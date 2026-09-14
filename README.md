@@ -25,18 +25,18 @@ Four people, one shared obsession with getting this thing to actually work. Ever
 <table>
   <tr>
     <td align="center">
-      <a href="https://github.com/asronal">
-        <img src="https://github.com/asronal.png" width="90" height="90" style="border-radius: 50%"><br><br>
-        <b>Asronal</b>
-      </a><br>
-      <sub>Hardware & Integrations</sub>
-    </td>
-    <td align="center">
       <a href="https://github.com/AnujD21">
         <img src="https://github.com/AnujD21.png" width="90" height="90" style="border-radius: 50%"><br><br>
         <b>Anuj D</b>
       </a><br>
       <sub>Software</sub>
+    </td>
+    <td align="center">
+      <a href="https://github.com/asronal">
+        <img src="https://github.com/asronal.png" width="90" height="90" style="border-radius: 50%"><br><br>
+        <b>Asronal</b>
+      </a><br>
+      <sub>Hardware & Integrations</sub>
     </td>
     <td align="center">
       <a href="https://github.com/vishal6626">
