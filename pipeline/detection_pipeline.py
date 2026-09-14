@@ -114,17 +114,15 @@ class DetectionPipeline:
             t0 = time.perf_counter()
             timing = {}
 
-            # 1. Read sensors
+            # 1. Read thermal first — it's the gate. At ~4.3fps sensor rate
+            # but a 25Hz poll loop, most iterations hit the "not ready yet"
+            # branch below and get discarded; reading RGB/radar (a real
+            # frame .copy(), not free) before knowing that wasted a copy on
+            # every one of those throwaway iterations. Only read them once
+            # we know this cycle will actually be used.
             t = time.perf_counter()
             raw, visual = self.thermal.read()
-            rgb_new = self.rgb.read()
-            # FIX: cache last good RGB frame — prevents black pane during
-            # camera warmup (_WARMUP_FRAMES) and watchdog restart gaps.
-            if rgb_new is not None:
-                self._last_rgb = rgb_new
-            rgb = self._last_rgb
-            radar_data = self.radar.get_presence()
-            timing["sensors_ms"] = (time.perf_counter() - t) * 1000
+            timing["thermal_ms"] = (time.perf_counter() - t) * 1000
 
             # thermal.read() returns (None, None) both when rate-limited (normal,
             # between 250ms refresh cycles) and on actual I2C errors.
@@ -138,6 +136,16 @@ class DetectionPipeline:
                 continue
             else:
                 self._last_thermal_ok = time.monotonic()
+
+            t = time.perf_counter()
+            rgb_new = self.rgb.read()
+            # FIX: cache last good RGB frame — prevents black pane during
+            # camera warmup (_WARMUP_FRAMES) and watchdog restart gaps.
+            if rgb_new is not None:
+                self._last_rgb = rgb_new
+            rgb = self._last_rgb
+            radar_data = self.radar.get_presence()
+            timing["sensors_ms"] = (time.perf_counter() - t) * 1000
 
             # 2. Anomaly detector — every frame
             t = time.perf_counter()

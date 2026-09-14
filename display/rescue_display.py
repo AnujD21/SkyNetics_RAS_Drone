@@ -176,6 +176,11 @@ class RescueDisplay:
                     p = f"{self.cfg.snapshot_dir}/auto_snap_TRK{t.track_id}_{fd.frame_id:05d}.jpg"
                     self._enqueue_io("snapshot", (p, canvas))
                     self._last_snapshot_time[t.track_id] = now
+            # Keyed by track_id, which keeps climbing over a long mission —
+            # bound it rather than leak indefinitely (same pattern as
+            # OSDRenderer._luma_ema and AnomalyDetector._conf_ema).
+            if len(self._last_snapshot_time) > 256:
+                self._last_snapshot_time.clear()
         # -----------------------------------------------------
 
         key = cv2.waitKey(1) & 0xFF
