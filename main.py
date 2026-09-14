@@ -103,7 +103,7 @@ import logging
 import threading
 import time
 
-from config import Config
+from config import Config, BASE_DIR
 from pipeline.detection_pipeline import DetectionPipeline
 from display.rescue_display import RescueDisplay
 
@@ -112,7 +112,10 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("rescue.log"),
+        # Anchored to the repo dir (BASE_DIR), not the process's cwd — see
+        # config.py's BASE_DIR comment for why a bare "rescue.log" scatters
+        # into $HOME when launched from anywhere but the project folder.
+        logging.FileHandler(str(BASE_DIR / "rescue.log")),
     ],
 )
 logger = logging.getLogger("main")

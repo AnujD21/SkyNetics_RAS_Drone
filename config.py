@@ -6,6 +6,15 @@ Hardware: BotWing F722 | MLX90640 | RPi Cam Module 3 | HLK-LD2410C-P
 from dataclasses import dataclass
 from pathlib import Path
 
+# Anchor every relative output path (logs, snapshots, models, config) to
+# THIS file's own directory instead of the process's current working
+# directory. Bare relative paths like "output/" or "rescue.log" resolve
+# against whatever's CWD when the script is launched — cd into the repo
+# and it's fine, but launch via an absolute path from $HOME, a systemd
+# WorkingDirectory that doesn't match the actual clone location, or a cron
+# job, and everything scatters into that directory instead of the repo.
+BASE_DIR = Path(__file__).resolve().parent
+
 
 @dataclass
 class Config:
@@ -48,7 +57,7 @@ class Config:
     fc_heartbeat_interval_sec: float = 5.0  # reconnect retry interval on UART error
 
     # ── ML: YOLOv8n ONNX ─────────────────────────────────────────
-    yolo_model_path: str = "models/rgb_human.onnx"
+    yolo_model_path: str = str(BASE_DIR / "models" / "rgb_human.onnx")
     yolo_input_size: int = 320          # Must match the locked ONNX export shape (320x320)
     # RPi4 has 4 cores total. Letting ONNX Runtime's thread pool claim all 4
     # during every YOLO call starves the camera/display/sensor threads of
@@ -86,19 +95,19 @@ class Config:
     fullscreen: bool = True             # Maximize window for composite VTX output
     headless: bool = False
     record: bool = False
-    output_video: str = "output/recording.mp4"
+    output_video: str = str(BASE_DIR / "output" / "recording.mp4")
 
     # ── Alerts & Snapshots ───────────────────────────────────────
     alert_cooldown_sec: float = 4.0
     snapshot_enabled: bool = True
-    snapshot_dir: str = "output"
+    snapshot_dir: str = str(BASE_DIR / "output")
     snapshot_cooldown: float = 5.0
 
     # ── Misc ─────────────────────────────────────────────────────
     demo_mode: bool = False
 
     def __post_init__(self):
-        Path("output").mkdir(exist_ok=True)
+        (BASE_DIR / "output").mkdir(exist_ok=True)
         Path(self.snapshot_dir).mkdir(parents=True, exist_ok=True)
-        Path("models").mkdir(exist_ok=True)
-        Path("config").mkdir(exist_ok=True)
+        (BASE_DIR / "models").mkdir(exist_ok=True)
+        (BASE_DIR / "config").mkdir(exist_ok=True)

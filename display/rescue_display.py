@@ -182,7 +182,10 @@ class RescueDisplay:
         if key in (ord("q"), 27):
             self._quit = True
         elif key == ord("s"):
-            p = f"output/snap_{fd.frame_id:05d}.jpg"
+            # Was hardcoded to "output/" (CWD-relative, and ignored
+            # cfg.snapshot_dir entirely) — use the same configured,
+            # BASE_DIR-anchored directory the auto-snapshots use.
+            p = f"{self.cfg.snapshot_dir}/snap_{fd.frame_id:05d}.jpg"
             self._enqueue_io("snapshot", (p, canvas))
         elif key == ord("m"):
             self._mode_idx = (self._mode_idx + 1) % len(THERMAL_MODES)
