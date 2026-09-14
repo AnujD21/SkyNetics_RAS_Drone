@@ -16,6 +16,8 @@ import cv2
 import numpy as np
 import time
 import logging
+import threading
+import queue
 from typing import Optional
 
 from pipeline.detection_pipeline import FrameData
@@ -103,6 +105,20 @@ class RescueDisplay:
         self._vfps_last: float = time.time()
         self._video_fps: float = 0.0
 
+        # ── Background disk I/O ─────────────────────────────────────────
+        # cv2.imwrite() (snapshots) and VideoWriter.write() (recording) can
+        # each cost tens of ms (JPEG/mp4v encode + SD card write). Doing
+        # that synchronously inside render() stalls the live display right
+        # when a human is detected — exactly when smoothness matters most.
+        # A bounded queue + worker thread keeps the display loop non-
+        # blocking; if the writer falls behind, we drop the oldest pending
+        # job rather than ever blocking render().
+        self._io_queue: "queue.Queue" = queue.Queue(maxsize=8)
+        self._io_thread = threading.Thread(
+            target=self._io_worker, daemon=True, name="display-io"
+        )
+        self._io_thread.start()
+
         cv2.namedWindow(self._WIN, cv2.WINDOW_NORMAL)
         if getattr(cfg, 'fullscreen', True):
             cv2.setWindowProperty(self._WIN, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
@@ -111,6 +127,30 @@ class RescueDisplay:
         if cfg.record:
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             self._writer = cv2.VideoWriter(cfg.output_video, fourcc, 8, (self.W, self.H))
+
+    def _io_worker(self):
+        """Runs on its own thread: drains (kind, payload) jobs and does the
+        actual disk I/O, so render() never blocks on it."""
+        while True:
+            job = self._io_queue.get()
+            if job is None:
+                break
+            kind, payload = job
+            try:
+                if kind == "snapshot":
+                    path, img = payload
+                    cv2.imwrite(path, img)
+                    logger.info(f"Snapshot saved: {path}")
+                elif kind == "record" and self._writer:
+                    self._writer.write(payload)
+            except Exception as e:
+                logger.warning(f"[display-io] Write failed: {e}")
+
+    def _enqueue_io(self, kind: str, payload):
+        try:
+            self._io_queue.put_nowait((kind, payload))
+        except queue.Full:
+            logger.warning(f"[display-io] Queue full — dropping {kind} job")
 
     def render(self, fd: FrameData):
         # -- Video FPS (rolling 30-frame average) --
@@ -124,9 +164,9 @@ class RescueDisplay:
             self._video_fps = 1.0 / (sum(self._vfps_buf) / len(self._vfps_buf))
 
         canvas = self._build(fd)
-        if self._writer: self._writer.write(canvas)
+        if self._writer: self._enqueue_io("record", canvas)
         cv2.imshow(self._WIN, canvas)
-        
+
         # --- AUTO SNAPSHOT (Mirrors Manual Snap Perfectly) ---
         if self.cfg.snapshot_enabled and getattr(fd, "tracked_humans", None):
             now = time.time()
@@ -134,18 +174,16 @@ class RescueDisplay:
                 last = self._last_snapshot_time.get(t.track_id, 0)
                 if now - last >= self.cfg.snapshot_cooldown:
                     p = f"{self.cfg.snapshot_dir}/auto_snap_TRK{t.track_id}_{fd.frame_id:05d}.jpg"
-                    cv2.imwrite(p, canvas)
-                    logger.info(f"Auto-Snapshot Saved: {p}")
+                    self._enqueue_io("snapshot", (p, canvas))
                     self._last_snapshot_time[t.track_id] = now
         # -----------------------------------------------------
-        
+
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), 27):
             self._quit = True
         elif key == ord("s"):
             p = f"output/snap_{fd.frame_id:05d}.jpg"
-            cv2.imwrite(p, canvas)
-            logger.info(f"Snapshot: {p}")
+            self._enqueue_io("snapshot", (p, canvas))
         elif key == ord("m"):
             self._mode_idx = (self._mode_idx + 1) % len(THERMAL_MODES)
             logger.info(f"Thermal mode: {THERMAL_MODES[self._mode_idx]}")
@@ -156,7 +194,17 @@ class RescueDisplay:
 
     def should_quit(self): return self._quit
 
+    @property
+    def video_fps(self) -> float:
+        """Rolling measured display render rate (what's actually on screen)."""
+        return self._video_fps
+
     def close(self):
+        # Let any pending snapshot/recording jobs drain before releasing the
+        # writer — otherwise the io thread could call write() on a writer
+        # that's already been released.
+        self._io_queue.put(None)
+        self._io_thread.join(timeout=3.0)
         if self._writer: self._writer.release()
         cv2.destroyAllWindows()
 

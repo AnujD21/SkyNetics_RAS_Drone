@@ -138,7 +138,27 @@ class RGBCamera:
         self._stop_event = threading.Event()
         self._last_capture_time: float = 0.0
 
+        # Rolling capture-rate tracker — lets callers actually measure real
+        # camera fps (vs. assuming it matches cfg.rgb_fps) for diagnosing
+        # video-path latency independent of inference.
+        self._fps_buf: list = []
+
     # ── Public API ─────────────────────────────────────────────────
+
+    @property
+    def fps(self) -> float:
+        """Rolling measured capture rate (frames actually delivered/sec)."""
+        with self._lock:
+            buf = list(self._fps_buf)
+        if len(buf) < 2:
+            return 0.0
+        return (len(buf) - 1) / (buf[-1] - buf[0])
+
+    @property
+    def capture_ts(self) -> float:
+        """Wall-clock time.time() the most recent frame was captured."""
+        with self._lock:
+            return self._last_capture_time
 
     def initialize(self) -> bool:
         """Launch the background capture thread. Hardware init happens inside it."""
@@ -162,8 +182,6 @@ class RGBCamera:
 
     def read(self) -> Optional[np.ndarray]:
         """Return latest frame (thread-safe copy). None if not yet available."""
-        if self.cfg.demo_mode:
-            return self._synthetic()
         with self._lock:
             return self._frame.copy() if self._frame is not None else None
 
@@ -315,6 +333,25 @@ class RGBCamera:
         if not self._open_hardware():
             return
 
+        if self.cfg.demo_mode:
+            # No real hardware — publish synthetic frames at cfg.rgb_fps
+            # through the exact same self._frame/_last_capture_time/_fps_buf
+            # path real hardware uses, so is_online/.fps/.capture_ts behave
+            # consistently and display+inference threads see the same
+            # "latest frame" instead of each fabricating their own.
+            interval = 1.0 / max(1, self.cfg.rgb_fps)
+            while not self._stop_event.is_set():
+                frame = self._synthetic()
+                with self._lock:
+                    self._frame = frame
+                    self._last_capture_time = time.time()
+                    self._fps_buf.append(self._last_capture_time)
+                    if len(self._fps_buf) > 60: self._fps_buf.pop(0)
+                time.sleep(interval)
+            with self._lock:
+                self._online = False
+            return
+
         h, w = self.cfg.rgb_height, self.cfg.rgb_width
         frame_count = 0
 
@@ -358,6 +395,8 @@ class RGBCamera:
                         with self._lock:
                             self._frame = frame
                             self._last_capture_time = time.time()
+                            self._fps_buf.append(self._last_capture_time)
+                            if len(self._fps_buf) > 60: self._fps_buf.pop(0)
 
                     if self._stop_event.is_set():
                         break
@@ -369,6 +408,7 @@ class RGBCamera:
                     frame_count = 0
                     with self._lock:
                         self._last_capture_time = time.time()
+                        self._fps_buf.clear()   # don't let the restart gap skew measured fps
                     if not self._open_hardware():
                         logger.error("[RGB] Camera restart failed — giving up")
                         break
@@ -385,6 +425,8 @@ class RGBCamera:
                         with self._lock:
                             self._frame = frame
                             self._last_capture_time = time.time()
+                            self._fps_buf.append(self._last_capture_time)
+                            if len(self._fps_buf) > 60: self._fps_buf.pop(0)
                     else:
                         time.sleep(0.02)
                 else:

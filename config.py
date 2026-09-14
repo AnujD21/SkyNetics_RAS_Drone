@@ -50,6 +50,12 @@ class Config:
     # ── ML: YOLOv8n ONNX ─────────────────────────────────────────
     yolo_model_path: str = "models/rgb_human.onnx"
     yolo_input_size: int = 320          # Must match the locked ONNX export shape (320x320)
+    # RPi4 has 4 cores total. Letting ONNX Runtime's thread pool claim all 4
+    # during every YOLO call starves the camera/display/sensor threads of
+    # CPU for that ~200ms window, which shows up as video stutter in sync
+    # with inference even though the threads are architecturally decoupled.
+    # Leave at least one core free for everything else.
+    yolo_intra_threads: int = 2
     yolo_conf_threshold: float = 0.10   # Dropped drastically to allow partial face detection
     yolo_iou_threshold: float = 0.45
     yolo_every_n_frames: int = 1        # run every frame for maximum responsiveness

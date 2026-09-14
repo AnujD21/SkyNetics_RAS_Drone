@@ -291,7 +291,9 @@ class YOLODetector:
 
                 import onnxruntime as ort
                 opts = ort.SessionOptions()
-                opts.intra_op_num_threads = 4
+                # Deliberately NOT using all CPU cores here — see cfg.yolo_intra_threads
+                # in config.py for why (starves camera/display/sensor threads on a Pi4).
+                opts.intra_op_num_threads = self.cfg.yolo_intra_threads
                 opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
                 self._model = ort.InferenceSession(
                     str(path), sess_options=opts,
@@ -299,7 +301,7 @@ class YOLODetector:
                 )
                 self._input_name = self._model.get_inputs()[0].name
                 self._backend    = "onnx"
-                logger.info(f"[YOLO] ONNX loaded: {path} | 4-core | {self.cfg.yolo_input_size}px")
+                logger.info(f"[YOLO] ONNX loaded: {path} | {self.cfg.yolo_intra_threads}-thread | {self.cfg.yolo_input_size}px")
                 return True
             except Exception as e:
                 logger.warning(f"[YOLO] ONNX failed: {e}")

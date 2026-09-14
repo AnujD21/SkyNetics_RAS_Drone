@@ -193,6 +193,12 @@ def main():
             TARGET_FPS = 30
             target_dt  = 1.0 / TARGET_FPS
 
+            # Periodic perf log — cheap enough to leave on permanently, and
+            # is the actual evidence (not just an assumption) that the
+            # display loop isn't waiting on YOLO/thermal/radar/fusion/tracker.
+            PERF_LOG_INTERVAL_S = 3.0
+            last_perf_log = 0.0
+
             while inf_thread.is_alive():
                 t0 = time.perf_counter()
 
@@ -208,6 +214,22 @@ def main():
                     display.render(fd)
                     if display.should_quit():
                         break
+
+                    now = time.time()
+                    if now - last_perf_log >= PERF_LOG_INTERVAL_S:
+                        last_perf_log = now
+                        cam_ts   = pipeline.rgb.capture_ts
+                        tm       = fd.timing_ms
+                        logger.info(
+                            "[PERF] camera=%.1ffps display=%.1ffps inference=%.1ffps | "
+                            "yolo=%.0fms sensors=%.0fms fusion=%.0fms tracker=%.0fms | "
+                            "video_frame_age=%.0fms detection_age=%.0fms | blocked_on_ml=NO",
+                            pipeline.rgb.fps, display.video_fps, fd.fps,
+                            tm.get("yolo_ms", 0.0), tm.get("sensors_ms", 0.0),
+                            tm.get("fusion_ms", 0.0), tm.get("tracker_ms", 0.0),
+                            (now - cam_ts) * 1000 if cam_ts else 0.0,
+                            (now - fd.timestamp) * 1000,
+                        )
 
                 elapsed  = time.perf_counter() - t0
                 sleep_t  = target_dt - elapsed
