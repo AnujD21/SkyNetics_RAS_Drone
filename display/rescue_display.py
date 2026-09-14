@@ -94,6 +94,10 @@ class RescueDisplay:
         self._curr_ts:   float = 0.0
         self._last_frame_id: int = -1
 
+        # Cache for the expensive ThermalIsolator output — see _thermal_pane()
+        self._iso_cache_key = None
+        self._iso_cache_val: Optional[np.ndarray] = None
+
         # Rolling video-FPS tracker (display render rate)
         self._vfps_buf: list = []
         self._vfps_last: float = time.time()
@@ -264,12 +268,22 @@ class RescueDisplay:
         mode = THERMAL_MODES[self._mode_idx]
 
         if fd.thermal_visual is not None and fd.thermal_raw is not None:
-            iso, _, _ = self._isolator.process(fd.thermal_raw, fd.thermal_visual, mode)
-            pane = cv2.resize(iso, (pw, ph), interpolation=cv2.INTER_LINEAR)
-            sw, sh = fd.thermal_visual.shape[1], fd.thermal_visual.shape[0]
+            # ThermalIsolator.process() runs adaptive background modeling +
+            # contour extraction on the raw thermal grid — real work, but
+            # fd.thermal_raw only actually changes at the ~4fps inference
+            # rate while this pane gets requested at ~30fps display rate.
+            # Recomputing it every display tick was wasted CPU (and it
+            # re-applied the background EMA to the SAME frame repeatedly,
+            # skewing its intentionally slow ~25-frame adaptation). Cache
+            # the isolated frame per (inference frame_id, mode) and reuse it
+            # across the redundant display ticks in between.
+            cache_key = (fd.frame_id, mode)
+            if cache_key != self._iso_cache_key:
+                self._iso_cache_val = self._isolator.process(fd.thermal_raw, fd.thermal_visual, mode)[0]
+                self._iso_cache_key = cache_key
+            pane = cv2.resize(self._iso_cache_val, (pw, ph), interpolation=cv2.INTER_LINEAR)
         elif fd.thermal_visual is not None:
             pane = cv2.resize(fd.thermal_visual, (pw, ph))
-            sw, sh = fd.thermal_visual.shape[1], fd.thermal_visual.shape[0]
         else:
             pane = np.full((ph, pw, 3), BG_DARK, dtype=np.uint8)
             _txt(pane, "THERMAL OFFLINE", (pw//2-60, ph//2), 0.5, GRAY_DIM)
