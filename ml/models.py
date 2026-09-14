@@ -511,7 +511,6 @@ class _Track:
         self.P         = self.F @ self.P @ self.F.T + self.Q
         self.total_age += 1
         self.missed    += 1
-        self.streak     = max(0, self.streak - 1)
         if self.x[2,0] < 0: self.x[2,0] = 1.
 
     def update(self, det: Detection):
@@ -572,13 +571,23 @@ class HumanTracker:
         for t in self._tracks: t.predict()
 
         # Association
-        matched_dets: set = set()
+        matched_dets:   set = set()
+        matched_tracks: set = set()
         if dets and self._tracks:
             db = np.array([[d.x1,d.y1,d.x2,d.y2] for d in dets], np.float32)
             tb = np.array([t.predicted_box() for t in self._tracks], np.float32)
             iou_mat = _iou_matrix(db, tb)
             for di, ti in _assign(iou_mat, self.cfg.tracker_iou_thresh):
-                self._tracks[ti].update(dets[di]); matched_dets.add(di)
+                self._tracks[ti].update(dets[di])
+                matched_dets.add(di); matched_tracks.add(ti)
+
+        # A track not matched this frame breaks its consecutive-hit streak.
+        # Done here (not inside predict()) so a run of consecutive matches
+        # actually accumulates streak instead of being reset every cycle
+        # right before update() re-adds it back to 1.
+        for ti, t in enumerate(self._tracks):
+            if ti not in matched_tracks:
+                t.streak = 0
 
         # Unmatched dets — try re-entry before creating new track
         for di in range(len(dets)):

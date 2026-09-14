@@ -113,11 +113,11 @@ class LD2450Sensor:
             return True
 
         try:
-            # Note: LD2450 runs at 256000 baud
-            baud = 256000 
+            # LD2450 runs at 256000 baud by default — honour cfg.ld2410_baud
+            # instead of hardcoding, so the config value actually takes effect.
             port = serial.Serial(
                 port=self.cfg.ld2410_port,
-                baudrate=baud,
+                baudrate=self.cfg.ld2410_baud,
                 timeout=1.0,
             )
 
@@ -128,7 +128,7 @@ class LD2450Sensor:
             self._thread.start()
             self._online = True
             logger.info(
-                f"[LD2450] 2D Tracking Radar online on {self.cfg.ld2410_port} @ {baud}"
+                f"[LD2450] 2D Tracking Radar online on {self.cfg.ld2410_port} @ {self.cfg.ld2410_baud}"
             )
             return True
 
@@ -190,15 +190,22 @@ class LD2450Sensor:
     def _parse_payload(self, payload: bytes) -> Optional[PresenceData]:
         targets = []
         for i in range(3):
-            # Each target is 8 bytes: X, Y, Speed, Res (all Int16 / short little-endian)
+            # Each target is 8 bytes: X, Y, Speed, Res (all uint16 little-endian)
             offset = i * 8
-            # The LD2450 formats signed values specially in some builds, but standard is little endian short
-            x, y, v, res = struct.unpack_from("<hhhh", payload, offset)
-            
-            # Unmapped targets are usually all zeroes, or Y is 0. 
-            if y > 0: 
-                # Note: The LD2450 often masks the sign bit. For standard FW:
-                # X has bit 15 as sign.
+            x_raw, y_raw, v_raw, res = struct.unpack_from("<HHHH", payload, offset)
+
+            # The LD2450 does NOT use two's complement for X/Y/Speed — bit 15
+            # is a sign flag (1 = positive, 0 = negative) and bits 0-14 hold the
+            # absolute magnitude. Unpacking as plain signed shorts flipped the
+            # sign of every "positive" (bit15 set) reading, which is the normal
+            # case for a target in front of the radar — so real targets were
+            # decoding as negative Y and failing the `y > 0` check below.
+            x = self._decode_signed(x_raw)
+            y = self._decode_signed(y_raw)
+            v = self._decode_signed(v_raw)
+
+            # Unmapped target slots are all-zero bytes -> y decodes to 0.
+            if y > 0:
                 t = RadarTarget(
                     x_mm=x,
                     y_mm=y,
@@ -206,8 +213,14 @@ class LD2450Sensor:
                     resolution=res
                 )
                 targets.append(t)
-                
+
         return PresenceData(targets=targets, timestamp=time.time())
+
+    @staticmethod
+    def _decode_signed(raw: int) -> int:
+        """LD2450 sign-magnitude int16: bit15 = sign (1=positive), bits0-14 = magnitude."""
+        magnitude = raw & 0x7FFF
+        return magnitude if (raw & 0x8000) else -magnitude
 
     def _demo_loop(self):
         import random

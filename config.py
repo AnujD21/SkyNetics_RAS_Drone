@@ -19,11 +19,14 @@ class Config:
     thermal_colormap: str = "inferno"
 
     # ── RPi Camera Module 3 (CSI / libcamera) ─────────────────────
-    # Sony IMX708, 12MP — captured at 640×480 for display
+    # Sony IMX708, 12MP — captured at 640×360 for display
+    # 16:9 to match display_width/display_height (and the IMX708's native
+    # 2304x1296 full-frame readout) — keeps the RGB resize in rescue_display
+    # a uniform scale instead of stretching a 4:3 capture into a 16:9 canvas.
     # Uses libcamera backend (NOT cv2.VideoCapture)
     # Wiring: Connect ribbon cable to Raspberry Pi 4's primary CSI camera port. Silver contacts facing HDMI ports.
     rgb_width: int = 640
-    rgb_height: int = 480
+    rgb_height: int = 360
     rgb_fps: int = 30
 
     # ── HLK-LD2410C-P Presence Radar (UART) ──────────────────────

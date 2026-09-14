@@ -76,9 +76,23 @@ class RescueDisplay:
         self._main_view_idx = 0  # 0: RGB, 1: Thermal, 2: Radar
 
         self._isolator = ThermalIsolator(cfg)
-        
+
         self._last_snapshot_time = {} # track_id -> timestamp
         self._osd      = OSDRenderer(cfg)
+
+        # ── Box motion extrapolation ──────────────────────────────────
+        # Inference (tracker/YOLO) only produces a new set of boxes at the
+        # thermal-gated inference rate (~4fps), but this display renders up
+        # to 30fps. Without this, a box sits frozen for ~7-8 video frames
+        # then jumps to its next position — jerky against the smooth video.
+        # We keep the last two inference cycles' boxes per track_id and
+        # linearly project each box forward using its own recent velocity,
+        # so it glides continuously instead of holding-then-snapping.
+        self._prev_dets: dict = {}   # track_id -> Detection (previous inference cycle)
+        self._prev_ts:   float = 0.0
+        self._curr_dets: dict = {}   # track_id -> Detection (latest inference cycle)
+        self._curr_ts:   float = 0.0
+        self._last_frame_id: int = -1
 
         # Rolling video-FPS tracker (display render rate)
         self._vfps_buf: list = []
@@ -150,15 +164,8 @@ class RescueDisplay:
         else:
             base_layers = self._radar_pane(fd, self.W, self.H)
 
-        sx, sy = self.W/self.W, self.H/self.H # 1.0
-        scaled = [
-            Detection(
-                x1=d.x1*sx, y1=d.y1*sy, x2=d.x2*sx, y2=d.y2*sy,
-                confidence=d.confidence, source=d.source,
-                track_id=d.track_id, temp_celsius=d.temp_celsius,
-            )
-            for d in fd.tracked_humans
-        ]
+        self._roll_detection_window(fd)
+        scaled = self._extrapolated_dets()
 
         rd = fd.radar
         fc_telemetry = fd.fc_telemetry
@@ -209,6 +216,47 @@ class RescueDisplay:
             _txt(canvas, f"MAH  {batt_mah_pip}",                     (pip_x + 4, pip_y - 24), 0.48, WHITE)
 
         return canvas
+
+    # ── Box motion extrapolation ────────────────────────────────────
+
+    _MAX_EXTRAPOLATION_ALPHA = 1.5   # cap projection to 1.5x one inference cycle
+
+    def _roll_detection_window(self, fd: FrameData):
+        """Whenever a NEW inference result arrives (frame_id changes), shift
+        the current cycle's boxes into 'previous' and record the new ones as
+        'current', keyed by track_id. Between inference cycles this is a
+        no-op — the display just keeps extrapolating from the same window."""
+        if fd.frame_id == self._last_frame_id:
+            return
+        self._prev_dets, self._prev_ts = self._curr_dets, self._curr_ts
+        self._curr_dets = {d.track_id: d for d in fd.tracked_humans if d.track_id is not None}
+        self._curr_ts = time.time()
+        self._last_frame_id = fd.frame_id
+
+    def _extrapolated_dets(self) -> list:
+        """Project each track's box forward from its last two known
+        positions using its own recent velocity, evaluated at the current
+        wall-clock time. Gives smooth continuous motion at full display fps
+        instead of holding a box still for a whole inference cycle."""
+        now = time.time()
+        dt_cycle = self._curr_ts - self._prev_ts
+        out = []
+        for tid, cur in self._curr_dets.items():
+            prev = self._prev_dets.get(tid)
+            if prev is None or dt_cycle <= 1e-3:
+                out.append(cur)
+                continue
+            alpha = (now - self._curr_ts) / dt_cycle
+            alpha = max(0.0, min(alpha, self._MAX_EXTRAPOLATION_ALPHA))
+            out.append(Detection(
+                x1=cur.x1 + (cur.x1 - prev.x1) * alpha,
+                y1=cur.y1 + (cur.y1 - prev.y1) * alpha,
+                x2=cur.x2 + (cur.x2 - prev.x2) * alpha,
+                y2=cur.y2 + (cur.y2 - prev.y2) * alpha,
+                confidence=cur.confidence, source=cur.source,
+                track_id=cur.track_id, temp_celsius=cur.temp_celsius,
+            ))
+        return out
 
     # ── Thermal pane ──────────────────────────────────────────────
 
