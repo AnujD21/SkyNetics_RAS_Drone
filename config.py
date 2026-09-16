@@ -68,6 +68,14 @@ class Config:
     yolo_conf_threshold: float = 0.10   # Dropped drastically to allow partial face detection
     yolo_iou_threshold: float = 0.45
     yolo_every_n_frames: int = 1        # run every frame for maximum responsiveness
+    # Preprocessing must match how rgb_human.onnx was actually trained/exported.
+    # True (default) = letterbox (pad to preserve aspect ratio) — correct if
+    # trained via the standard Ultralytics dataloader.
+    # False = plain stretch-resize straight to yolo_input_size, no padding —
+    # try this if boxes are consistently offset (usually vertically, on a
+    # 16:9 camera feed) under letterbox mode; that symptom matches a model
+    # trained with a plain resize instead of letterboxing.
+    yolo_letterbox: bool = True
 
     # ── ML: Anomaly Detector ─────────────────────────────────────
     anomaly_enabled: bool = True

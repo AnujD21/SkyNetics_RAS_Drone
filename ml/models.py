@@ -336,23 +336,39 @@ class YOLODetector:
         
         if out_w is None: out_w = VW
         if out_h is None: out_h = VH
-        
-        # --- LETTERBOXING TO PRESERVE ASPECT RATIO ---
+
         shape = visual.shape[:2]  # H, W
-        r = min(sz / shape[0], sz / shape[1])
-        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
-        dw, dh = sz - new_unpad[0], sz - new_unpad[1]
-        dw /= 2; dh /= 2
-        
-        if shape[::-1] != new_unpad:
-            resized = cv2.resize(visual, new_unpad, interpolation=cv2.INTER_LINEAR)
+
+        if getattr(self.cfg, "yolo_letterbox", True):
+            # --- LETTERBOX: preserve aspect ratio, pad with grey bars ---
+            r = min(sz / shape[0], sz / shape[1])
+            new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+            dw, dh = sz - new_unpad[0], sz - new_unpad[1]
+            dw /= 2; dh /= 2
+
+            if shape[::-1] != new_unpad:
+                resized = cv2.resize(visual, new_unpad, interpolation=cv2.INTER_LINEAR)
+            else:
+                resized = visual.copy()
+
+            top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+            left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+            resized = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+            rx = ry = r
         else:
-            resized = visual.copy()
-            
-        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
-        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-        resized = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
-        
+            # --- PLAIN STRETCH: resize straight to sz x sz, no padding ---
+            # Only correct if the model was trained/exported with the same
+            # non-aspect-preserving resize. Try this if boxes are
+            # consistently offset with letterbox mode — some training
+            # pipelines (ad-hoc scripts, not the standard Ultralytics
+            # dataloader) resize straight to the target size instead of
+            # letterboxing, and inference must then match training exactly
+            # or every box comes out shifted by roughly the letterbox
+            # padding amount.
+            resized = cv2.resize(visual, (sz, sz), interpolation=cv2.INTER_LINEAR)
+            dw = dh = 0.0
+            rx, ry = sz / shape[1], sz / shape[0]
+
         # YOLO ONNX expects RGB colors for proper skin tracking; OpenCV gives us BGR.
         if len(resized.shape) == 3 and resized.shape[2] == 3:
             resized = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
@@ -368,14 +384,14 @@ class YOLODetector:
             blob = cv2.dnn.blobFromImage(resized, 1/255.0, (sz, sz), swapRB=False, crop=False)
             self._model.setInput(blob)
             out = self._model.forward()
-            
-        return self._parse_letterbox(out, out_w, out_h, VW, VH, r, dw, dh)
 
-    def _parse_letterbox(self, out, out_w, out_h, VW, VH, r, dw, dh) -> List[Detection]:
+        return self._parse_letterbox(out, out_w, out_h, VW, VH, rx, ry, dw, dh)
+
+    def _parse_letterbox(self, out, out_w, out_h, VW, VH, rx, ry, dw, dh) -> List[Detection]:
         if out.ndim == 3:
             pred = out[0]
             # Matrix transpose for YOLOv8 which outputs [num_classes + 4, num_anchors]
-            if pred.shape[0] < pred.shape[1]: 
+            if pred.shape[0] < pred.shape[1]:
                 pred = pred.T
         else:
             pred = out
@@ -387,12 +403,14 @@ class YOLODetector:
         pred, confs = pred[keep], confs[keep]
         if len(pred) == 0:
             return []
-            
-        # 1. Strip letterbox padding and scaling back to original visual frame (VW, VH)
-        cx = (pred[:,0] - dw) / r
-        cy = (pred[:,1] - dh) / r
-        bw = (pred[:,2]) / r
-        bh = (pred[:,3]) / r
+
+        # 1. Strip letterbox padding and scale back to the original visual
+        # frame (VW, VH). rx==ry in letterbox mode (uniform scale); they
+        # differ in plain-stretch mode (independent x/y scale, dw=dh=0).
+        cx = (pred[:,0] - dw) / rx
+        cy = (pred[:,1] - dh) / ry
+        bw = (pred[:,2]) / rx
+        bh = (pred[:,3]) / ry
         
         # 2. Scale up to the display constraints (out_w, out_h)
         sx, sy = out_w / VW, out_h / VH
