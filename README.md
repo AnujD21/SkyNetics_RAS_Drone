@@ -5,9 +5,10 @@
 ![Language](https://img.shields.io/badge/Language-Python%203.9+-3776AB?style=for-the-badge&logo=python)
 ![AI](https://img.shields.io/badge/AI-YOLOv8%20ONNX-FF6F00?style=for-the-badge&logo=yolo)
 ![Hardware](https://img.shields.io/badge/Sensors-MLX90640%20%7C%20LD2450%20%7C%20PiCAM3-10B981?style=for-the-badge)
+![Offline](https://img.shields.io/badge/Connectivity-100%25%20Offline-0EA5E9?style=for-the-badge)
 
 <p align="center">
-  <img src="assets/osd_showcase.png" alt="Rescue Drone OSD Interface" width="100%">
+  <img src="https://readme-typing-svg.demolab.com/?font=Fira+Code&pause=1200&color=22C55E&background=00000000&center=true&vCenter=true&width=780&height=50&lines=Thermal+%2B+RGB+%2B+mmWave+Radar+Fusion;Fully+Offline+%E2%80%94+No+Cloud%2C+No+Internet;Live+OSD+at+~30fps%2C+Guaranteed;Built+to+Find+Survivors+When+Seconds+Count" alt="Typing SVG" />
 </p>
 
 Every second counts when someone is buried under snow or debris. That thought is what pushed us to build this.
@@ -15,6 +16,27 @@ Every second counts when someone is buried under snow or debris. That thought is
 **Rescue Drone v3** is something we poured a lot of late nights into — a fully autonomous, multi-sensor aerial system that can find survivors in avalanches and landslides when it's too dangerous or too slow for rescuers to search on foot. It fuses **thermal imaging, mmWave radar, and RGB vision** to detect human presence from above, runs completely offline on a Raspberry Pi 4, and beams a live augmented overlay straight to the pilot's goggles through an analog VTX.
 
 No internet required. No fancy server. Just a drone, some clever sensor fusion, and the hope that it gets there in time.
+
+<p align="center">
+  <img src="assets/osd_modes.gif" alt="Rescue Drone OSD cycling through RGB, Thermal, and Radar views" width="100%">
+  <br>
+  <sub><em>The actual live overlay, cycling through all three sensing modes — captured straight from the running system.</em></sub>
+</p>
+
+---
+
+## 📖 Table of Contents
+
+- [The Team](#-the-team)
+- [How It Works](#%EF%B8%8F-how-it-works)
+  - [End-to-end data flow](#end-to-end-data-flow)
+  - [The concurrency trick: video that never stalls](#the-concurrency-trick-video-that-never-stalls)
+  - [Deep dives](#-deep-dives)
+- [Project Structure](#%EF%B8%8F-how-we-organized-the-code)
+- [Wiring It All Together](#-wiring-it-all-together)
+- [Getting the Pi Ready](#%EF%B8%8F-getting-the-pi-ready)
+- [Launching the System](#-launching-the-system)
+- [Why the Radar Changes Everything](#-why-the-radar-changes-everything)
 
 ---
 
@@ -67,13 +89,167 @@ Four people, one shared obsession with getting this thing to actually work. Ever
 
 ---
 
-## 🏗️ How We Built It
+## ⚙️ How It Works
+
+### End-to-end data flow
+
+Four sensors feed one fusion engine, which feeds one tracker, which feeds the OSD the pilot actually flies on. Nothing here talks to the cloud — every box below runs on the Pi itself.
+
+```mermaid
+flowchart LR
+    subgraph Sensors["📡 Sensors"]
+        RGB["📷 RGB Camera<br/>Pi Cam 3"]
+        THERM["🌡️ Thermal Array<br/>MLX90640 · 32×24px"]
+        RADAR["📶 mmWave Radar<br/>HLK-LD2450"]
+        FC["✈️ Flight Controller<br/>BotWing F722"]
+    end
+
+    subgraph AI["🧠 On-Device AI — Raspberry Pi 4"]
+        YOLO["YOLOv8 ONNX<br/>Person Detection"]
+        ANOM["Adaptive Thermal<br/>Anomaly Detector"]
+        FUSE["Sensor Fusion<br/>confidence-weighted:<br/>thermal .65 · radar .25 · vision .10"]
+        TRACK["Kalman + SORT<br/>Multi-Object Tracker"]
+    end
+
+    subgraph Out["🖥️ Live Output"]
+        OSD["OSD Renderer"]
+        VTX["📺 Analog VTX<br/>→ Pilot's FPV Goggles"]
+    end
+
+    RGB --> YOLO --> FUSE
+    THERM --> ANOM --> FUSE
+    RADAR -. "confidence boost only<br/>(can't localize alone)" .-> FUSE
+    FUSE --> TRACK --> OSD
+    FC -. "read-only telemetry" .-> OSD
+    OSD --> VTX
+```
+
+**Why radar is dotted, not solid:** a 2-D FMCW radar like the LD2450 can tell you *something* is there and roughly how far, but it can't draw you a box. So it never creates a detection on its own — it only boosts the confidence of a thermal/vision hit that's already there, or logs a "possible deep burial" note when it sees presence with nothing visual or thermal to back it up.
+
+### The concurrency trick: video that never stalls
+
+This is the single most important engineering decision in the whole project, and the one most prototype detection drones get wrong: **the pilot's live video must never wait on the AI.** YOLO and thermal processing are comparatively slow (tens–hundreds of ms); if the video pipeline waited on them, the pilot would be flying on a stuttering feed — a real flight-safety hazard, not just an annoyance.
+
+The fix is three independent threads that only ever hand off the *latest* value, never a queue:
+
+```mermaid
+flowchart TB
+    subgraph T1["🎥 Camera Thread — continuous"]
+        C1["Capture frame"] --> C2["Overwrite the ONE latest-frame slot<br/>(old frame discarded, never queued)"]
+    end
+    subgraph T2["🧠 Inference Thread — thermal-gated, ~4Hz"]
+        I1["Read thermal sensor"] --> I2["Anomaly detect + YOLO"] --> I3["Fuse + track"] --> I4["Publish latest result<br/>(lock-protected, brief)"]
+    end
+    subgraph T3["🖥️ Display Thread — up to 30fps"]
+        D1["Grab the FRESHEST camera frame"] --> D2["Overlay latest tracked boxes<br/>(velocity-extrapolated for smoothness)"] --> D3["Render OSD → stream to VTX"]
+    end
+
+    C2 -.always fresh, never stale.-> D1
+    I4 -.never blocks the display.-> D2
+```
+
+If YOLO suddenly took 1 full second per frame, the **video would stay at ~30fps** — only the bounding-box update rate would drop. We proved this during development by artificially stalling inference and watching the display loop hold steady.
+
+### 🔍 Deep dives
+
+<details>
+<summary><b>🌡️ How thermal detection works — no trained model, on purpose</b></summary>
+
+<br>
+
+At 32×24 pixels, the MLX90640 has too little spatial resolution for a trained model to be reliable — so instead we use **adaptive statistical thresholding**, which turns out to be both simpler and more robust at this resolution:
+
+1. **Track the background, not the target.** An exponential moving average continuously estimates the *coldest* pixels' mean and standard deviation, deliberately excluding hot candidate regions so a person walking into frame doesn't drag the "background" temperature upward with them.
+2. **Threshold above that adaptive baseline** — `background + max(1.5°C, 3σ)` — combined with a human body-temperature window (12–45 °C, loosened from the textbook 26–39 °C to tolerate clothing and indoor bench-testing).
+3. **Shape-filter the result**: aspect ratio between 0.25–2.5, minimum blob area, morphological cleanup — rejects blobs that are the right temperature but the wrong shape to be a person (a sun-warmed rock, for instance).
+4. **Confidence from thermal contrast** — the hotter a blob is above the adaptive background, the higher its confidence score, smoothed with its own EMA so it doesn't flicker frame to frame.
+
+This lives in `ml/models.py`'s `AnomalyDetector`, with a second, silhouette-focused implementation in `ml/thermal_isolation.py` used for the on-screen thermal picture-in-picture.
+</details>
+
+<details>
+<summary><b>👁️ How the RGB/YOLO detection works</b></summary>
+
+<br>
+
+A single-class ("person") **YOLOv8n** model, exported to **ONNX** and run via **ONNX Runtime** (with an OpenCV DNN fallback if ONNX Runtime fails to load on a given board). Every frame:
+
+1. **Letterbox the frame** to 320×320 — pad to preserve aspect ratio rather than squashing the image, so a person's proportions aren't distorted before the model ever sees them.
+2. **Run inference**, then **undo the letterbox math** to map boxes back to the original camera frame, then scale up to the display resolution — this is what keeps a box glued to the right spot on screen regardless of camera vs. display resolution.
+3. **Confidence threshold is deliberately low (0.10)** — this detector is tuned to favor recall (catch partial/occluded people) on the assumption that sensor fusion downstream, not YOLO alone, is responsible for rejecting false positives.
+
+Lives in `ml/models.py`'s `YOLODetector`. There's also a `cfg.yolo_letterbox` toggle to switch to plain stretch-resize preprocessing — useful if a differently-trained model ever expects that instead.
+</details>
+
+<details>
+<summary><b>🔀 How sensor fusion decides "human detected"</b></summary>
+
+<br>
+
+Thermal and RGB detections are merged by IoU (intersection-over-union): overlapping boxes from both sensors count as corroborating evidence for the same person; non-overlapping detections are kept independently. Confidence weights reflect how much we trust each modality for *this specific scenario*:
+
+| Sensor | Weight | Why |
+|---|---|---|
+| Thermal | **0.65** | Primary — works with zero light, sees through light debris |
+| Radar | **0.25** | Confirmation boost — works through snow/fog where cameras can't |
+| RGB/Anomaly | **0.10** | Supporting signal |
+
+A radar hit boosts the confidence of a detection that's already there. Radar presence with **nothing** thermal or visual to back it up doesn't invent a box — it logs a "possible deep burial" note instead, since a 2-D radar genuinely can't localize precisely enough to draw one honestly.
+
+Lives in `ml/models.py`'s `SensorFusion`.
+</details>
+
+<details>
+<summary><b>🎯 How tracking keeps a person's ID stable</b></summary>
+
+<br>
+
+A SORT-style tracker: each tracked person gets a **7-state linear Kalman filter** (`x, y, scale, aspect ratio` + their velocities) that predicts where they'll be next frame. New detections are matched to existing tracks by IoU using the Hungarian algorithm (`scipy.optimize.linear_sum_assignment`, with a greedy fallback if SciPy isn't installed).
+
+A few refinements on top of vanilla SORT:
+- **Re-entry graveyard** — a person who briefly leaves frame or gets occluded gets their *same* ID back instead of being double-counted as a new survivor.
+- **EMA box smoothing** — displayed boxes are exponentially smoothed, not raw detection output, so they don't jitter.
+- **Velocity extrapolation between inference cycles** — since new detections only arrive ~4×/second but video renders up to 30fps, each box is projected forward using its own recent velocity so it glides instead of snapping.
+
+Lives in `ml/models.py`'s `HumanTracker` / `_Track`, with the display-side extrapolation in `display/rescue_display.py`.
+</details>
+
+<details>
+<summary><b>⚡ How we keep video at ~30fps no matter how slow the AI is</b></summary>
+
+<br>
+
+Beyond the three-thread split above, a few specific bottlenecks had to be found and fixed by hand:
+
+- **ONNX Runtime was starving the other threads.** It was configured to use all 4 of the Pi's CPU cores for every YOLO call — technically independent threads still need an actual core to run on, so the camera/display threads were getting starved during every ~200ms inference call. Capped to 2 threads, leaving headroom.
+- **The OSD was doing ~20 full-frame color-space conversions per frame.** Each on-screen text element (there are about twenty — telemetry, FPS, alerts, per-person labels) was independently round-tripping the whole 1280×720 frame through PIL. Batched into a single conversion pass — roughly a 7× speedup on that code path alone.
+- **The thermal picture-in-picture was reprocessing itself 7–8× more than necessary.** It re-ran the full adaptive-threshold pipeline on every display tick (~30fps) even though the underlying thermal frame only actually changes at ~4fps. Now cached per real inference frame.
+- **Redundant sensor reads on throwaway cycles.** The inference loop polls the thermal sensor faster than the sensor actually refreshes; the camera and radar were being read (and copied!) even on cycles that were about to be discarded. Reordered so those reads only happen once we know the cycle will be used.
+</details>
+
+<details>
+<summary><b>🐛 Real bugs we found (and fixed) building this</b></summary>
+
+<br>
+
+Left here because they're the kind of thing that'll bite anyone building something similar:
+
+- **IMX708 camera driver bug** — requesting a low-resolution camera stream silently drops every frame due to a phase-detection-autofocus metadata parsing bug in libcamera. Fixed by forcing the sensor's full-frame native readout and letting the ISP hardware-scale down for free.
+- **LD2450 radar sign-decode bug** — the radar encodes X/Y/speed as sign-magnitude (bit 15 = sign flag), not two's complement. Decoding it as a plain signed integer flipped the sign of every "positive" (i.e. most) reading, so real targets were silently failing the presence check.
+- **Tracker hit-streak bug** — a track's "consecutive hits" counter was being reset every single frame regardless of whether it actually matched that frame, capping it at 1 forever. Invisible with the default settings, but would have silently broken the anti-flicker confirmation logic the moment anyone tuned it.
+- **Aspect-ratio mismatch** — the camera captured 4:3 but the display canvas was 16:9, so every frame was being non-uniformly stretched before it ever reached the pilot's eyes. Boxes were technically aligned to the stretched video, but the video itself looked subtly wrong.
+- **OSD color channel swap** — the on-screen alert colors were being run through a BGR→RGB conversion meant for a different part of the codebase, so "red" alerts rendered blue and the orange "HUMAN DETECTED!" banner rendered blue-ish.
+</details>
+
+---
+
+## 🗂️ How We Organized the Code
+
+One of the things we were most careful about was keeping everything modular. The AI pipeline, the display layer, and the hardware drivers don't know much about each other — which saved us a ton of headaches when a sensor misbehaved or we needed to swap out a model. Each piece does its job and gets out of the way.
 
 <p align="center">
   <img src="assets/drone_architecture.png" alt="Drone System Architecture" width="100%">
 </p>
-
-One of the things we were most careful about was keeping everything modular. The AI pipeline, the display layer, and the hardware drivers don't know much about each other — which saved us a ton of headaches when a sensor misbehaved or we needed to swap out a model. Each piece does its job and gets out of the way.
 
 ```text
 rescue_drone_osd_fixed/
